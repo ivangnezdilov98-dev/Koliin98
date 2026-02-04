@@ -72,6 +72,12 @@ class DepositStates(StatesGroup):
 class PaymentStates(StatesGroup):
     waiting_for_screenshot = State()
 
+# НОВОЕ: Состояния для изменения баланса админом
+class AdminBalanceStates(StatesGroup):
+    waiting_for_user_id = State()
+    waiting_for_balance_action = State()
+    waiting_for_balance_amount = State()
+
 # ==================== БАЗА ДАННЫХ ====================
 
 class Database:
@@ -680,6 +686,32 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
     )
     return builder.as_markup()
 
+# НОВОЕ: Клавиатура для управления балансом пользователя
+def admin_balance_actions_kb() -> InlineKeyboardMarkup:
+    """Действия с балансом пользователя"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text='➕ Пополнить', callback_data='admin_balance_add'),
+        InlineKeyboardButton(text='➖ Снять', callback_data='admin_balance_deduct')
+    )
+    builder.row(
+        InlineKeyboardButton(text='🔙 Назад', callback_data='admin_users'),
+        InlineKeyboardButton(text='🏠 Главное меню', callback_data='main_menu')
+    )
+    return builder.as_markup()
+
+# НОВОЕ: Клавиатура для действий с пользователями
+def admin_users_actions_kb() -> InlineKeyboardMarkup:
+    """Клавиатура действий с пользователями"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text='💰 Изменить баланс', callback_data='admin_edit_balance'),
+    )
+    builder.row(
+        InlineKeyboardButton(text='🔙 Назад', callback_data='admin_users'),
+    )
+    return builder.as_markup()
+
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
 @dp.message(CommandStart())
@@ -769,6 +801,114 @@ async def handle_admin_command(message: Message):
     except Exception as e:
         print(f"Ошибка при обработке /admin: {e}")
         await message.answer("❌ Ошибка при загрузке админ-панели")
+
+# НОВОЕ: Команда для быстрого изменения баланса
+@dp.message(Command("addbalance"))
+async def handle_addbalance_command(message: Message):
+    """Команда добавления баланса пользователю"""
+    try:
+        # Проверяем права администратора
+        if message.from_user.id not in config.ADMIN_IDS:
+            await message.answer("⛔ У вас нет прав администратора")
+            return
+        
+        # Извлекаем аргументы
+        command_parts = message.text.split(maxsplit=2)
+        if len(command_parts) < 3:
+            await message.answer(
+                "❌ Неверный формат команды.\n\n"
+                "Использование:\n"
+                "/addbalance <id_пользователя> <сумма>\n\n"
+                "Примеры:\n"
+                "/addbalance 123456789 1000 - добавить 1000₽\n"
+                "/addbalance 123456789 -500 - снять 500₽\n\n"
+                "Для просмотра пользователей:\n"
+                "/admin → 👥 Пользователи"
+            )
+            return
+        
+        user_id_text = command_parts[1]
+        amount_text = command_parts[2]
+        
+        try:
+            user_id = int(user_id_text)
+            amount = float(amount_text)
+        except ValueError:
+            await message.answer(
+                "❌ Неверный формат данных!\n\n"
+                "ID должен быть числом, сумма - числом с точкой или запятой.\n"
+                "Пример: /addbalance 123456789 1500.50"
+            )
+            return
+        
+        # Получаем пользователя
+        user_data = db.get_user(user_id)
+        current_balance = user_data.get("balance", 0.0)
+        
+        if amount == 0:
+            await message.answer("❌ Сумма не может быть равна 0")
+            return
+        
+        if amount > 0:
+            # Пополнение баланса
+            db.add_balance(
+                user_id=user_id,
+                amount=amount,
+                description=f"Ручное пополнение администратором @{message.from_user.username}"
+            )
+            action_text = f"добавлено {amount:.2f}₽"
+            new_balance = current_balance + amount
+        else:
+            # Снятие средств (если отрицательная сумма)
+            if current_balance < abs(amount):
+                await message.answer(
+                    f"❌ Недостаточно средств у пользователя!\n\n"
+                    f"Текущий баланс: {current_balance:.2f}₽\n"
+                    f"Попытка снять: {abs(amount):.2f}₽"
+                )
+                return
+            
+            success, msg = db.deduct_balance(
+                user_id=user_id,
+                amount=abs(amount),
+                description=f"Ручное списание администратором @{message.from_user.username}"
+            )
+            
+            if not success:
+                await message.answer(f"❌ Ошибка: {msg}")
+                return
+            
+            action_text = f"снято {abs(amount):.2f}₽"
+            new_balance = current_balance - abs(amount)
+        
+        # Отправляем результат
+        result_text = f"""
+✅ Баланс пользователя успешно изменен!
+
+👤 ID пользователя: {user_id}
+💰 Было: {current_balance:.2f}₽
+🔄 Действие: {action_text}
+💰 Стало: {new_balance:.2f}₽
+👨‍💼 Администратор: @{message.from_user.username or message.from_user.id}
+"""
+        
+        # Пытаемся уведомить пользователя
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                                text=f"💰 Ваш баланс изменен администратором!\n\n"
+                     f"🔄 Действие: {action_text}\n"
+                     f"💰 Текущий баланс: {new_balance:.2f}₽"
+            )
+        except Exception as e:
+            print(f"Не удалось уведомить пользователя {user_id}: {e}")
+            result_text += f"\n⚠️ Пользователь не получил уведомление (возможно, не начинал диалог с ботом)"
+        
+        await message.answer(result_text)
+        
+    except Exception as e:
+        print(f"Ошибка при выполнении команды /addbalance: {e}")
+        await message.answer("❌ Ошибка при изменении баланса")
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 
@@ -2089,6 +2229,9 @@ async def handle_admin_users(callback: CallbackQuery):
         # Создаем клавиатуру
         builder = InlineKeyboardBuilder()
         builder.row(
+            InlineKeyboardButton(text='💰 Изменить баланс', callback_data='admin_edit_balance'),
+        )
+        builder.row(
             InlineKeyboardButton(text='🔙 Назад', callback_data='admin_panel')
         )
         
@@ -2102,6 +2245,247 @@ async def handle_admin_users(callback: CallbackQuery):
         await callback.answer("Ошибка", show_alert=True)
     
     await callback.answer()
+
+@dp.callback_query(F.data == 'admin_edit_balance')
+async def handle_admin_edit_balance(callback: CallbackQuery, state: FSMContext):
+    """Начать изменение баланса пользователя"""
+    try:
+        # Проверяем права администратора
+        if callback.from_user.id not in config.ADMIN_IDS:
+            await callback.answer("⛔ Нет доступа", show_alert=True)
+            return
+        
+        await state.set_state(AdminBalanceStates.waiting_for_user_id)
+        
+        await callback.message.edit_text(
+            text="💰 Изменение баланса пользователя\n\n"
+                 "Введите ID пользователя, которому хотите изменить баланс:\n\n"
+                 "📝 Чтобы получить ID пользователя:\n"
+                 "1. Попросите пользователя написать @userinfobot\n"
+                 "2. Или найдите его ID в списке пользователей (/admin → 👥 Пользователи)\n\n"
+                 "Формат: просто число (например: 1234567890)",
+            reply_markup=cancel_kb()
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при запуске изменения баланса: {e}")
+        await callback.answer("Ошибка", show_alert=True)
+        await state.clear()
+    
+    await callback.answer()
+
+@dp.message(AdminBalanceStates.waiting_for_user_id)
+async def handle_user_id_input(message: Message, state: FSMContext):
+    """Обработать введенный ID пользователя"""
+    try:
+        user_id_text = message.text.strip()
+        
+        try:
+            user_id = int(user_id_text)
+        except ValueError:
+            await message.answer(
+                text="❌ Неверный формат ID!\n\n"
+                     "ID должен быть числом.\n"
+                     "Пример: 1234567890\n\n"
+                     "Введите ID пользователя:",
+                reply_markup=cancel_kb()
+            )
+            return
+        
+        # Проверяем существование пользователя
+        user_data = db.get_user(user_id)
+        current_balance = user_data.get("balance", 0.0)
+        
+        # Сохраняем ID пользователя в состоянии
+        await state.update_data(target_user_id=user_id)
+        await state.set_state(AdminBalanceStates.waiting_for_balance_action)
+        
+        await message.answer(
+            text=f"👤 Пользователь найден!\n\n"
+                 f"🆔 ID: {user_id}\n"
+                 f"💰 Текущий баланс: {current_balance:.2f}₽\n\n"
+                 f"Выберите действие с балансом:",
+            reply_markup=admin_balance_actions_kb()
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при обработке ID пользователя: {e}")
+        await message.answer(
+            text="❌ Ошибка при обработке ID пользователя",
+            reply_markup=main_menu_kb(message.from_user.id)
+        )
+        await state.clear()
+
+@dp.callback_query(F.data == 'admin_balance_add')
+async def handle_admin_balance_add(callback: CallbackQuery, state: FSMContext):
+    """Начать процесс пополнения баланса пользователя"""
+    try:
+        # Проверяем права администратора
+        if callback.from_user.id not in config.ADMIN_IDS:
+            await callback.answer("⛔ Нет доступа", show_alert=True)
+            return
+        
+        await state.set_state(AdminBalanceStates.waiting_for_balance_amount)
+        await state.update_data(action='add')
+        
+        await callback.message.edit_text(
+            text="💰 Пополнение баланса пользователя\n\n"
+                 "Введите сумму для пополнения (положительное число):\n\n"
+                 "Примеры:\n"
+                 "• 1000 - пополнить на 1000₽\n"
+                 "• 500.50 - пополнить на 500.50₽",
+            reply_markup=cancel_kb()
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при начале пополнения баланса: {e}")
+        await callback.answer("Ошибка", show_alert=True)
+        await state.clear()
+    
+    await callback.answer()
+
+@dp.callback_query(F.data == 'admin_balance_deduct')
+async def handle_admin_balance_deduct(callback: CallbackQuery, state: FSMContext):
+    """Начать процесс снятия баланса у пользователя"""
+    try:
+        # Проверяем права администратора
+        if callback.from_user.id not in config.ADMIN_IDS:
+            await callback.answer("⛔ Нет доступа", show_alert=True)
+            return
+        
+        await state.set_state(AdminBalanceStates.waiting_for_balance_amount)
+        await state.update_data(action='deduct')
+        
+        await callback.message.edit_text(
+            text="💰 Снятие баланса у пользователя\n\n"
+                 "Введите сумму для снятия (положительное число):\n\n"
+                 "Примеры:\n"
+                 "• 1000 - снять 1000₽\n"
+                 "• 500.50 - снять 500.50₽",
+            reply_markup=cancel_kb()
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при начале снятия баланса: {e}")
+        await callback.answer("Ошибка", show_alert=True)
+        await state.clear()
+    
+    await callback.answer()
+
+@dp.message(AdminBalanceStates.waiting_for_balance_amount)
+async def handle_balance_amount_input(message: Message, state: FSMContext):
+    """Обработать введенную сумму для изменения баланса"""
+    try:
+        # Получаем данные из состояния
+        data = await state.get_data()
+        user_id = data.get('target_user_id')
+        action = data.get('action')
+        
+        if not user_id:
+            await message.answer("❌ Ошибка: ID пользователя не найден")
+            await state.clear()
+            return
+        
+        # Обрабатываем сумму
+        amount_text = message.text.strip().replace(',', '.')
+        
+        try:
+            amount = float(amount_text)
+        except ValueError:
+            await message.answer(
+                text="❌ Неверный формат суммы!\n\n"
+                     "Пожалуйста, введите число.\n"
+                     "Пример: 1000 или 1500.50",
+                reply_markup=cancel_kb()
+            )
+            return
+        
+        if amount <= 0:
+            await message.answer(
+                text="❌ Сумма должна быть положительной!\n\n"
+                     "Введите сумму больше 0:",
+                reply_markup=cancel_kb()
+            )
+            return
+        
+        # Получаем текущий баланс пользователя
+        user_data = db.get_user(user_id)
+        current_balance = user_data.get("balance", 0.0)
+        
+        # Выполняем действие
+        if action == 'add':
+            # Пополнение баланса
+            db.add_balance(
+                user_id=user_id,
+                amount=amount,
+                description=f"Ручное пополнение администратором @{message.from_user.username}"
+            )
+            action_text = f"добавлено {amount:.2f}₽"
+            new_balance = current_balance + amount
+        else:
+            # Снятие средств
+            if current_balance < amount:
+                await message.answer(
+                    text=f"❌ Недостаточно средств у пользователя!\n\n"
+                         f"Текущий баланс: {current_balance:.2f}₽\n"
+                         f"Попытка снять: {amount:.2f}₽\n\n"
+                         f"Введите меньшую сумму:",
+                    reply_markup=cancel_kb()
+                )
+                return
+            
+            success, msg = db.deduct_balance(
+                user_id=user_id,
+                amount=amount,
+                description=f"Ручное списание администратором @{message.from_user.username}"
+            )
+            
+            if not success:
+                await message.answer(f"❌ Ошибка: {msg}")
+                await state.clear()
+                return
+            
+            action_text = f"снято {amount:.2f}₽"
+            new_balance = current_balance - amount
+        
+        # Очищаем состояние
+        await state.clear()
+        
+        # Формируем результат
+        result_text = f"""
+✅ Баланс пользователя успешно изменен!
+
+👤 ID пользователя: {user_id}
+💰 Было: {current_balance:.2f}₽
+🔄 Действие: {action_text}
+💰 Стало: {new_balance:.2f}₽
+👨‍💼 Администратор: @{message.from_user.username or message.from_user.id}
+"""
+        
+        # Пытаемся уведомить пользователя
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"💰 Ваш баланс изменен администратором!\n\n"
+                     f"🔄 Действие: {action_text}\n"
+                     f"💰 Текущий баланс: {new_balance:.2f}₽"
+            )
+        except Exception as e:
+            print(f"Не удалось уведомить пользователя {user_id}: {e}")
+            result_text += f"\n⚠️ Пользователь не получил уведомление (возможно, не начинал диалог с ботом)"
+        
+        await message.answer(
+            text=result_text,
+            reply_markup=main_menu_kb(message.from_user.id)
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при изменении баланса: {e}")
+        await message.answer(
+            text="❌ Ошибка при изменении баланса",
+            reply_markup=main_menu_kb(message.from_user.id)
+        )
+        await state.clear()
 
 @dp.callback_query(F.data == 'admin_stats')
 async def handle_admin_stats(callback: CallbackQuery):

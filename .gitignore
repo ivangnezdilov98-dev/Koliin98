@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.env  # ⚠️ ЭТО ВАЖНО! Не загружать .env файл
+.env.local
+
+# Данные бота
+data/
+products_data.json
+users_data.json
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Системные
+.DS_Store
+Thumbs.db

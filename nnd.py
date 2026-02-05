@@ -30,7 +30,7 @@ class Config:
     # Реквизиты для оплаты (только Ozon)
     PAYMENT_DETAILS = {
         "ozon": {
-            "name": "Ozon Банк/Втб (СБП/Карта)",
+            "name": "Ozon Банк (СБП/Карта)",
             "card_number": "2200 2488 7412 7581",  # Замените на реальный номер
             "phone_number": "+79225739192",  # Замените на реальный номер
             "owner": "Иван Г."
@@ -261,6 +261,12 @@ async def send_to_order_channel(order_data: Dict, screenshot_file_id: str = None
         product_name = order_data.get('product_name', 'Неизвестный товар')
         product_price = order_data.get('product_price', 0)
         
+        # Проверяем наличие username
+        if user_info == 'без username':
+            username_warning = "⚠️ ВНИМАНИЕ: У покупателя НЕТ USERNAME!"
+        else:
+            username_warning = ""
+        
         message_text = f"""🛒 НОВЫЙ ЗАКАЗ
 
 👤 Покупатель: @{user_info}
@@ -271,6 +277,9 @@ async def send_to_order_channel(order_data: Dict, screenshot_file_id: str = None
 📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}
 🆔 ID заказа: {order_id}
 """
+        
+        if username_warning:
+            message_text += f"\n{username_warning}"
         
         if screenshot_file_id:
             message_text += "\n📸 Прикреплен скриншот оплаты"
@@ -284,7 +293,8 @@ async def send_to_order_channel(order_data: Dict, screenshot_file_id: str = None
             'product_name': product_name,
             'product_price': product_price,
             'payment_method': 'Ozon (СБП/Карта)',
-            'date': datetime.now().isoformat()
+            'date': datetime.now().isoformat(),
+            'has_username': user_info != 'без username'  # Флаг наличия username
         })
         
         # Создаем клавиатуру с кнопками подтверждения
@@ -301,6 +311,15 @@ async def send_to_order_channel(order_data: Dict, screenshot_file_id: str = None
                 callback_data=f'reject_order_{order_id}'
             )
         )
+        
+        # Если у пользователя нет username, добавляем предупреждение
+        if user_info == 'без username':
+            builder.row(
+                InlineKeyboardButton(
+                    text='⚠️ НЕТ USERNAME!',
+                    callback_data=f'no_username_{order_id}'
+                )
+            )
         
         keyboard = builder.as_markup()
         
@@ -347,6 +366,11 @@ def main_menu_kb(user_id: int = None) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text='🛒 Посмотреть услуги', callback_data='view_categories'),
     )
     
+    # Добавляем кнопку поддержки для всех пользователей
+    builder.row(
+        InlineKeyboardButton(text='🆘 Поддержка', callback_data='support'),
+    )
+    
     # Добавляем кнопку админ-панели для администраторов
     if user_id in config.ADMIN_IDS:
         builder.row(
@@ -354,7 +378,6 @@ def main_menu_kb(user_id: int = None) -> InlineKeyboardMarkup:
         )
     
     return builder.as_markup()
-
 def categories_kb() -> InlineKeyboardMarkup:
     """Категории товаров"""
     builder = InlineKeyboardBuilder()
@@ -373,24 +396,75 @@ def categories_kb() -> InlineKeyboardMarkup:
     )
     return builder.as_markup()
 
-def products_kb(category_id: int) -> InlineKeyboardMarkup:
-    """Товары в категории"""
+def products_kb(category_id: int, page: int = 0, items_per_page: int = 5) -> InlineKeyboardMarkup:
+    """Товары в категории с пагинацией"""
     builder = InlineKeyboardBuilder()
     products = db.get_products_by_category(category_id)
     
-    for product in products:
+    if not products:
         builder.row(
             InlineKeyboardButton(
-                text=f"{product['name']} - {product['price']}₽",
-                callback_data=f"product_{product['id']}"
+                text="📭 Нет товаров в этой категории",
+                callback_data="no_action"
             )
         )
+    else:
+        # Разбиваем на страницы
+        total_pages = max(1, (len(products) + items_per_page - 1) // items_per_page)
+        start_idx = page * items_per_page
+        end_idx = min(start_idx + items_per_page, len(products))
+        
+        # Показываем товары текущей страницы
+        for product in products[start_idx:end_idx]:
+            # Сокращаем название если слишком длинное
+            product_name = product['name']
+            if len(product_name) > 25:
+                product_name = product_name[:22] + "..."
+            
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"📦 {product_name} - {product['price']}₽",
+                    callback_data=f"product_{product['id']}"
+                )
+            )
+        
+        # Кнопки навигации
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=f"page_{category_id}_{page-1}"
+                )
+            )
+        
+        # Кнопка "информация о странице" в центре
+        if total_pages > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text=f"{page+1}/{total_pages}",
+                    callback_data="no_action"
+                )
+            )
+        
+        if page < total_pages - 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="Вперед ➡️",
+                    callback_data=f"page_{category_id}_{page+1}"
+                )
+            )
+        
+        if nav_buttons:
+            builder.row(*nav_buttons)
     
     builder.row(
         InlineKeyboardButton(text='🔙 Назад к категориям', callback_data='view_categories'),
         InlineKeyboardButton(text='🏠 Главное меню', callback_data='main_menu')
     )
+    
     return builder.as_markup()
+
 
 def product_detail_kb(product_id: int, category_id: int) -> InlineKeyboardMarkup:
     """Детали товара"""
@@ -479,11 +553,36 @@ async def handle_start(message: Message):
     """Обработка команды /start"""
     try:
         user_id = message.from_user.id
+        username = message.from_user.username
+        
+        # Проверяем наличие юзернейма
+        if not username:
+            warning_text = """⚠️ ВНИМАНИЕ!
+
+У вас не установлен username в Telegram.
+
+Это может привести к проблемам:
+1. Я не смогу связаться с вами для отправки товара
+2. Администраторы не смогут уточнить детали заказа
+
+📌 Как установить username:
+1. Откройте Настройки Telegram
+2. Выберите "Имя пользователя" (Username)
+3. Установите уникальное имя (например, @ivan_ivanov)
+4. Сохраните изменения
+
+После установки username нажмите /start снова."""
+            
+            await message.answer(
+                text=warning_text,
+                reply_markup=main_menu_kb(user_id)
+            )
+            return
         
         # Регистрируем пользователя
         db.get_user(user_id)
         
-        welcome_text = """👋 Добро пожаловать в магазин виртуальных услуг!
+        welcome_text = f"""👋 Добро пожаловать, @{username}!
 
 ✨ Возможности:
 • 🛒 Просмотр и покупка услуг
@@ -501,6 +600,65 @@ async def handle_start(message: Message):
     except Exception as e:
         print(f"Ошибка при обработке /start: {e}")
         await message.answer("❌ Произошла ошибка при запуске")
+
+
+@dp.message(Command("support"))
+async def handle_support_command(message: Message):
+    """Обработка команды /support"""
+    try:
+        user_id = message.from_user.id
+        username = message.from_user.username or message.from_user.first_name
+        
+        support_text = f"""🆘 Поддержка
+
+По всем вопросам обращайтесь:
+👨‍💼 Администратор: {config.ADMIN_USERNAME}
+
+📞 Контакты:
+• Telegram: {config.ADMIN_USERNAME}
+• Наш бот: @{message.bot.username}
+
+🕐 Режим работы: 24/7
+⏱️ Среднее время ответа: 5-15 минут
+
+💬 Мы поможем с:
+• Выбором и оформлением заказа
+• Оплатой товара
+• Получением товара
+• Возвратом средств
+• Техническими проблемами
+
+Ваш ID для связи: {user_id}
+"""
+        
+        # Создаем клавиатуру
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text='💬 Написать администратору',
+                url=f'https://t.me/{config.ADMIN_USERNAME.replace("@", "")}'
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text='🛒 Посмотреть товары',
+                callback_data='view_categories'
+            ),
+            InlineKeyboardButton(
+                text='🏠 Главное меню',
+                callback_data='main_menu'
+            )
+        )
+        
+        await message.answer(
+            text=support_text,
+            reply_markup=builder.as_markup(),
+            disable_web_page_preview=True
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при обработке команды /support: {e}")
+        await message.answer("❌ Произошла ошибка при загрузке информации о поддержке")
 
 @dp.message(Command("admin"))
 async def handle_admin_command(message: Message):
@@ -649,6 +807,45 @@ async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
     try:
         print(f"DEBUG: Начало обработки покупки: {callback.data}")
         
+        # Проверяем наличие юзернейма у пользователя
+        username = callback.from_user.username
+        user_id = callback.from_user.id
+        
+        if not username:
+            print(f"DEBUG: У пользователя {user_id} нет username")
+            
+            error_text = """⚠️ У вас не установлен username!
+
+Для оформления заказа необходимо:
+1. Установить username в настройках Telegram
+2. Нажать /start в этом боте
+3. Повторить покупку
+
+📌 Как установить username:
+1. Откройте Настройки Telegram
+2. Выберите "Имя пользователя" (Username)
+3. Установите уникальное имя
+4. Сохраните изменения
+
+После установки username нажмите /start и попробуйте снова."""
+            
+            # Создаем клавиатуру с кнопкой /start
+            builder = InlineKeyboardBuilder()
+            builder.row(
+                InlineKeyboardButton(
+                    text='🚀 Начать заново (/start)',
+                    callback_data='force_start'
+                )
+            )
+            
+            await callback.message.edit_text(
+                text=error_text,
+                reply_markup=builder.as_markup()
+            )
+            
+            await callback.answer("❌ Установите username для покупки", show_alert=True)
+            return
+        
         # Извлекаем ID товара
         parts = callback.data.split('_')
         print(f"DEBUG: parts = {parts}")
@@ -679,11 +876,6 @@ async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Товар не найден", show_alert=True)
             return
         
-        # Отладочная информация о структуре товара
-        print(f"DEBUG: Структура товара:")
-        for key, value in product.items():
-            print(f"  {key}: {value} (тип: {type(value)})")
-        
         # Проверяем наличие товара
         quantity = product.get('quantity', 9999)
         print(f"DEBUG: Количество товара: {quantity}")
@@ -692,9 +884,6 @@ async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
             print("DEBUG: ❌ Товар закончился")
             await callback.answer("❌ Товар закончился", show_alert=True)
             return
-        
-        user_id = callback.from_user.id
-        username = callback.from_user.username or "без username"
         
         # Генерируем ID заказа
         order_id = f"ORD_{user_id}_{int(datetime.now().timestamp())}"
@@ -705,11 +894,9 @@ async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
         
         # Получаем цену товара безопасным способом
         try:
-            # Пробуем разные способы получения цены
             if isinstance(product.get('price'), (int, float)):
                 product_price = float(product['price'])
             elif isinstance(product.get('price'), str):
-                # Убираем возможные символы валюты и пробелы
                 price_str = product['price'].replace('₽', '').replace('руб', '').replace(' ', '').strip()
                 product_price = float(price_str)
             else:
@@ -720,6 +907,7 @@ async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
             product_price = 0.0
             
         print(f"DEBUG: Цена товара: {product_price}")
+        print(f"DEBUG: Username пользователя: @{username}")
         
         # Устанавливаем состояние ожидания скриншота
         await state.set_state(PaymentStates.waiting_for_screenshot)
@@ -743,6 +931,7 @@ async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
 
 📦 Товар: {product['name']}
 💰 Сумма к оплате: {product_price:.2f}₽
+👤 Ваш username: @{username}
 
 💳 Номер карты для перевода:
 {payment_info['card_number']}
@@ -761,7 +950,7 @@ async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
         
         await callback.message.edit_text(
             text=payment_text,
-            reply_markup=cancel_kb()  # Добавляем кнопку отмены
+            reply_markup=cancel_kb()
         )
         print("DEBUG: Сообщение с инструкцией отправлено")
         
@@ -914,6 +1103,53 @@ async def handle_cancel_payment(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка при отмене", show_alert=True)
     await callback.answer()
 
+@dp.callback_query(F.data == 'support')
+async def handle_support(callback: CallbackQuery):
+    """Обработка кнопки поддержки"""
+    try:
+        user_id = callback.from_user.id
+        username = callback.from_user.username or callback.from_user.first_name
+        
+        support_text = f"""🆘 Поддержка
+
+По всем вопросам обращайтесь:
+👨‍💼 Администратор: {config.ADMIN_USERNAME}
+
+🕐 Время ответа: 24/7
+💬 Мы поможем с:
+• Оформлением заказа
+• Оплатой товара
+• Получением товара
+• Техническими проблемами
+
+📝 Вы также можете написать напрямую администратору.
+Ваш ID для связи: {user_id}
+"""
+        
+        # Создаем клавиатуру с ссылкой на администратора
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text='💬 Написать администратору',
+                url=f'https://t.me/{config.ADMIN_USERNAME.replace("@", "")}'
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(text='🔙 Главное меню', callback_data='main_menu')
+        )
+        
+        await callback.message.edit_text(
+            text=support_text,
+            reply_markup=builder.as_markup(),
+            disable_web_page_preview=True
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при обработке поддержки: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+    
+    await callback.answer()
+
 # ==================== ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ АДМИНИСТРАТОРОМ ====================
 
 @dp.callback_query(F.data.startswith('confirm_order_'))
@@ -990,6 +1226,93 @@ async def handle_confirm_order(callback: CallbackQuery):
     except Exception as e:
         print(f"Ошибка при подтверждении заказа: {e}")
         await callback.answer("❌ Ошибка при подтверждении", show_alert=True)
+
+@dp.callback_query(F.data.startswith('page_'))
+async def handle_page_change(callback: CallbackQuery):
+    """Обработка смены страницы"""
+    try:
+        # Извлекаем данные из callback_data: page_123_1 (где 123 - category_id, 1 - page)
+        parts = callback.data.split('_')
+        if len(parts) != 3:
+            await callback.answer("Неверный формат запроса", show_alert=True)
+            return
+            
+        category_id = int(parts[1])
+        page = int(parts[2])
+        
+        # Получаем категорию для отображения названия
+        category = db.get_category(category_id)
+        category_name = category.get('name', 'Неизвестно') if category else 'Неизвестно'
+        
+        products = db.get_products_by_category(category_id)
+        items_per_page = 5
+        total_pages = max(1, (len(products) + items_per_page - 1) // items_per_page)
+        
+        if not products:
+            text = f"📭 В категории '{category_name}' пока нет товаров"
+        else:
+            start_idx = page * items_per_page + 1
+            end_idx = min((page + 1) * items_per_page, len(products))
+            
+            text = f"🛒 Товары в категории '{category_name}':\n"
+            text += f"📄 Показано {start_idx}-{end_idx} из {len(products)} товаров\n\n"
+            text += "Выберите товар:"
+        
+        await callback.message.edit_text(
+            text=text,
+            reply_markup=products_kb(category_id, page)
+        )
+        
+    except ValueError:
+        await callback.answer("Неверный ID категории", show_alert=True)
+    except Exception as e:
+        print(f"Ошибка при смене страницы: {e}")
+        await callback.answer("Ошибка загрузки товаров", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith('category_'))
+async def handle_category_products(callback: CallbackQuery):
+    """Показать товары в выбранной категории (первая страница)"""
+    try:
+        # Извлекаем ID категории
+        _, category_id_str = callback.data.split('_')
+        category_id = int(category_id_str)
+        
+        # Получаем категорию и товары
+        category = db.get_category(category_id)
+        products = db.get_products_by_category(category_id)
+        
+        if not products:
+            category_name = category.get('name', 'Неизвестно') if category else 'Неизвестно'
+            text = f"📭 В категории '{category_name}' пока нет товаров"
+        else:
+            category_name = category.get('name', 'Неизвестно') if category else 'Неизвестно'
+            items_per_page = 5
+            total_pages = max(1, (len(products) + items_per_page - 1) // items_per_page)
+            
+            text = f"🛒 Товары в категории '{category_name}':\n"
+            text += f"📄 Показано 1-{min(items_per_page, len(products))} из {len(products)} товаров\n\n"
+            text += "Выберите товар:"
+        
+        # Всегда показываем первую страницу при первом входе
+        await callback.message.edit_text(
+            text=text,
+            reply_markup=products_kb(category_id, page=0)
+        )
+        
+    except ValueError:
+        await callback.answer("Неверный ID категории", show_alert=True)
+    except Exception as e:
+        print(f"Ошибка при загрузке товаров категории: {e}")
+        await callback.answer("Ошибка загрузки товаров", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data == 'no_action')
+async def handle_no_action(callback: CallbackQuery):
+    """Обработка неактивных кнопок (номер страницы)"""
+    await callback.answer()  # Просто отвечаем, но ничего не делаем
 
 @dp.callback_query(F.data.startswith('reject_order_'))
 async def handle_reject_order(callback: CallbackQuery):
@@ -1319,6 +1642,65 @@ async def handle_admin_list_products(callback: CallbackQuery):
     
     await callback.answer()
 
+
+@dp.callback_query(F.data == 'force_start')
+async def handle_force_start(callback: CallbackQuery, state: FSMContext):
+    """Принудительный запуск бота с проверкой username"""
+    try:
+        await state.clear()
+        
+        user_id = callback.from_user.id
+        username = callback.from_user.username
+        
+        if not username:
+            error_text = """❌ Username не найден!
+
+Вы не установили username в Telegram.
+
+📌 Как установить username:
+1. Откройте Настройки Telegram
+2. Выберите "Имя пользователя" (Username)
+3. Установите уникальное имя
+4. Сохраните изменения
+
+После установки username нажмите /start"""
+            
+            await callback.message.edit_text(
+                text=error_text,
+                reply_markup=InlineKeyboardBuilder()
+                    .add(InlineKeyboardButton(text='🔄 Проверить снова', callback_data='force_start'))
+                    .as_markup()
+            )
+            return
+        
+        # Регистрируем пользователя
+        db.get_user(user_id)
+        
+        welcome_text = f"""✅ Username обнаружен: @{username}
+
+👋 Добро пожаловать в магазин виртуальных услуг!
+
+✨ Возможности:
+• 🛒 Просмотр и покупка услуг
+• 💳 Оплата через Ozon (СБП/Карта)
+• ✅ Подтверждение заказов администраторами
+
+Теперь вы можете покупать товары!"""
+        
+        await callback.message.edit_text(
+            text=welcome_text,
+            reply_markup=main_menu_kb(user_id)
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при принудительном запуске: {e}")
+        await callback.answer("Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+
+
+
 @dp.callback_query(F.data == 'admin_list_categories')
 async def handle_admin_list_categories(callback: CallbackQuery):
     """Список категорий"""
@@ -1395,6 +1777,49 @@ async def handle_admin_delete_product(callback: CallbackQuery, state: FSMContext
         await callback.answer("Ошибка", show_alert=True)
     
     await callback.answer()
+
+@dp.callback_query(F.data.startswith('no_username_'))
+async def handle_no_username_warning(callback: CallbackQuery):
+    """Обработка предупреждения о отсутствии username"""
+    try:
+        # Проверяем права администратора
+        if callback.from_user.id not in config.ADMIN_IDS:
+            await callback.answer("⛔ Нет доступа", show_alert=True)
+            return
+        
+        # Извлекаем ID заказа
+        order_id = callback.data.replace('no_username_', '')
+        
+        # Получаем данные заказа
+        order_data = db.get_pending_order(order_id)
+        if not order_data:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        
+        user_id = order_data.get('user_id')
+        
+        warning_text = f"""⚠️ ВНИМАНИЕ! У покупателя НЕТ USERNAME!
+
+🆔 ID заказа: {order_id}
+🆔 ID покупателя: {user_id}
+
+Действия:
+1. Отклонить заказ и попросить установить username
+2. Связаться с покупателем через личные сообщения по ID
+3. Попросить покупателя написать вам напрямую
+
+Риски:
+• Невозможно отправить товар
+• Невозможно уточнить детали
+• Покупатель может не получить уведомления"""
+        
+        await callback.answer(warning_text, show_alert=True)
+        
+    except Exception as e:
+        print(f"Ошибка при показе предупреждения: {e}")
+        await callback.answer("Ошибка", show_alert=True)
+
+
 
 @dp.callback_query(F.data.startswith('admin_delete_product_confirm_'))
 async def handle_admin_delete_product_confirm(callback: CallbackQuery):
@@ -1952,4 +2377,3 @@ async def main():
 if __name__ == "__main__":
     # Запускаем бота
     asyncio.run(main())
-

@@ -64,6 +64,10 @@ class PaymentStates(StatesGroup):
 class DeleteProductStates(StatesGroup):
     waiting_for_product_choice = State()
 
+class CartStates(StatesGroup):
+    waiting_for_quantity = State()  # Для ввода количества
+    managing_cart = State()         # Для управления корзиной
+
 # ==================== БАЗА ДАННЫХ ====================
 
 class Database:
@@ -234,6 +238,173 @@ class Database:
 
 db = Database()
 
+# ==================== МЕНЕДЖЕР КОРЗИНЫ ====================
+
+class CartManager:
+    """Менеджер корзины пользователя"""
+    
+    def __init__(self):
+        self.carts: Dict[int, List[Dict]] = {}  # user_id -> список товаров в корзине
+        self.load_carts()
+    
+    def load_carts(self):
+        """Загрузить корзины из файла"""
+        try:
+            if os.path.exists('carts_data.json'):
+                with open('carts_data.json', 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # Конвертируем ключи строк в int
+                    self.carts = {int(k): v for k, v in data.items()}
+            else:
+                self.carts = {}
+        except Exception as e:
+            print(f"Ошибка загрузки корзин: {e}")
+            self.carts = {}
+    
+    def save_carts(self):
+        """Сохранить корзины в файл"""
+        try:
+            with open('carts_data.json', 'w', encoding='utf-8') as f:
+                json.dump(self.carts, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Ошибка сохранения корзин: {e}")
+    
+    def get_cart(self, user_id: int) -> List[Dict]:
+        """Получить корзину пользователя"""
+        if user_id not in self.carts:
+            self.carts[user_id] = []
+        return self.carts[user_id]
+    
+    def add_to_cart(self, user_id: int, product_id: int, quantity: int = 1) -> bool:
+        """Добавить товар в корзину"""
+        try:
+            cart = self.get_cart(user_id)
+            product = db.get_product(product_id)
+            
+            if not product:
+                return False
+            
+            # Проверяем наличие товара
+            if quantity > product.get('quantity', 9999):
+                return False
+            
+            # Проверяем, есть ли уже товар в корзине
+            for item in cart:
+                if item['product_id'] == product_id:
+                    item['quantity'] += quantity
+                    self.save_carts()
+                    return True
+            
+            # Добавляем новый товар
+            cart.append({
+                'product_id': product_id,
+                'quantity': quantity,
+                'added_at': datetime.now().isoformat()
+            })
+            self.save_carts()
+            return True
+            
+        except Exception as e:
+            print(f"Ошибка добавления в корзину: {e}")
+            return False
+    
+    def remove_from_cart(self, user_id: int, product_id: int) -> bool:
+        """Удалить товар из корзины"""
+        try:
+            cart = self.get_cart(user_id)
+            initial_len = len(cart)
+            self.carts[user_id] = [item for item in cart if item['product_id'] != product_id]
+            
+            if len(self.carts[user_id]) < initial_len:
+                self.save_carts()
+                return True
+            return False
+            
+        except Exception as e:
+            print(f"Ошибка удаления из корзины: {e}")
+            return False
+    
+    def update_quantity(self, user_id: int, product_id: int, quantity: int) -> bool:
+        """Обновить количество товара в корзине"""
+        try:
+            cart = self.get_cart(user_id)
+            product = db.get_product(product_id)
+            
+            if not product:
+                return False
+            
+            # Проверяем наличие товара
+            if quantity > product.get('quantity', 9999):
+                return False
+            
+            for item in cart:
+                if item['product_id'] == product_id:
+                    item['quantity'] = quantity
+                    self.save_carts()
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Ошибка обновления количества: {e}")
+            return False
+    
+    def clear_cart(self, user_id: int) -> bool:
+        """Очистить корзину"""
+        try:
+            if user_id in self.carts:
+                del self.carts[user_id]
+                self.save_carts()
+                return True
+            return False
+        except Exception as e:
+            print(f"Ошибка очистки корзины: {e}")
+            return False
+    
+    def get_cart_total(self, user_id: int) -> Dict:
+        """Получить итог корзины"""
+        try:
+            cart = self.get_cart(user_id)
+            total_amount = 0.0
+            total_quantity = 0
+            items_details = []
+            
+            for item in cart:
+                product = db.get_product(item['product_id'])
+                if product:
+                    price = float(product['price'])
+                    quantity = item['quantity']
+                    item_total = price * quantity
+                    
+                    total_amount += item_total
+                    total_quantity += quantity
+                    
+                    items_details.append({
+                        'product_id': product['id'],
+                        'name': product['name'],
+                        'price': price,
+                        'quantity': quantity,
+                        'item_total': item_total
+                    })
+            
+            return {
+                'total_amount': total_amount,
+                'total_quantity': total_quantity,
+                'items': items_details,
+                'items_count': len(items_details)
+            }
+            
+        except Exception as e:
+            print(f"Ошибка расчета итога корзины: {e}")
+            return {'total_amount': 0, 'total_quantity': 0, 'items': [], 'items_count': 0}
+    
+    def get_cart_items_count(self, user_id: int) -> int:
+        """Получить количество товаров в корзине"""
+        return len(self.get_cart(user_id))
+
+# Создаем экземпляр менеджера корзины
+cart_manager = CartManager()
+
 # ==================== УТИЛИТЫ ====================
 
 async def send_to_order_channel(order_data: Dict, screenshot_file_id: str = None) -> Optional[int]:
@@ -357,17 +528,121 @@ async def send_to_order_channel(order_data: Dict, screenshot_file_id: str = None
         print(f"❌ Трассировка ошибки:\n{traceback.format_exc()}")
         return None
 
+async def send_cart_to_order_channel(order_data: Dict, screenshot_file_id: str = None) -> Optional[int]:
+    """
+    Отправить заказ из корзины в канал заказов
+    """
+    try:
+        user_info = order_data.get('username', 'без username')
+        user_id = order_data.get('user_id')
+        order_id = order_data.get('order_id', 'N/A')
+        cart_total = order_data.get('cart_total', {})
+        
+        if cart_total['items_count'] == 0:
+            print("❌ Пустая корзина при отправке в канал")
+            return None
+        
+        # Формируем текст с товарами
+        items_text = "📦 Состав заказа:\n"
+        for item in cart_total['items']:
+            items_text += f"• {item['name']} x{item['quantity']} = {item['item_total']:.2f}₽\n"
+        
+        message_text = f"""🛒 НОВЫЙ ЗАКАЗ ИЗ КОРЗИНЫ
+
+👤 Покупатель: @{user_info}
+🆔 ID: {user_id}
+{items_text}
+📦 Всего товаров: {cart_total['total_quantity']} шт.
+💰 Общая сумма: {cart_total['total_amount']:.2f}₽
+💳 Способ оплаты: Ozon (СБП/Карта)
+📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}
+🆔 ID заказа: {order_id}
+"""
+        
+        if user_info == 'без username':
+            message_text += "\n⚠️ ВНИМАНИЕ: У покупателя НЕТ USERNAME!"
+        
+        if screenshot_file_id:
+            message_text += "\n📸 Прикреплен скриншот оплаты"
+        
+        # Сохраняем данные заказа
+        db.add_pending_order(order_id, {
+            'user_id': user_id,
+            'username': user_info,
+            'order_id': order_id,
+            'total': cart_total['total_amount'],
+            'is_cart_order': True,
+            'cart_items': cart_total['items'],
+            'total_quantity': cart_total['total_quantity'],
+            'payment_method': 'Ozon (СБП/Карта)',
+            'date': datetime.now().isoformat(),
+            'has_username': user_info != 'без username'
+        })
+        
+        # Создаем клавиатуру
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text='✅ Подтвердить заказ',
+                callback_data=f'confirm_order_{order_id}'
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text='❌ Отклонить',
+                callback_data=f'reject_order_{order_id}'
+            )
+        )
+        
+        if user_info == 'без username':
+            builder.row(
+                InlineKeyboardButton(
+                    text='⚠️ НЕТ USERNAME!',
+                    callback_data=f'no_username_{order_id}'
+                )
+            )
+        
+        keyboard = builder.as_markup()
+        
+        # Отправляем сообщение в канал
+        if screenshot_file_id:
+            message = await bot.send_photo(
+                chat_id=config.ORDER_CHANNEL_ID,
+                photo=screenshot_file_id,
+                caption=message_text,
+                reply_markup=keyboard
+            )
+        else:
+            message = await bot.send_message(
+                chat_id=config.ORDER_CHANNEL_ID,
+                text=message_text,
+                reply_markup=keyboard
+            )
+        
+        print(f"✅ Заказ из корзины отправлен в канал. Message ID: {message.message_id}")
+        return message.message_id
+        
+    except Exception as e:
+        print(f"❌ Ошибка отправки заказа из корзины: {e}")
+        import traceback
+        print(f"❌ Трассировка ошибки:\n{traceback.format_exc()}")
+        return None
+
 # ==================== КЛАВИАТУРЫ ====================
 
 def main_menu_kb(user_id: int = None) -> InlineKeyboardMarkup:
     """Главное меню с учетом прав администратора"""
     builder = InlineKeyboardBuilder()
+    
+    # Добавляем кнопку корзины с количеством товаров
+    cart_count = cart_manager.get_cart_items_count(user_id) if user_id else 0
+    cart_text = f'🛒 Корзина ({cart_count})' if cart_count > 0 else '🛒 Корзина'
+    
     builder.row(
         InlineKeyboardButton(text='🛒 Посмотреть услуги', callback_data='view_categories'),
     )
-    
-    # Добавляем кнопку поддержки для всех пользователей
     builder.row(
+        InlineKeyboardButton(text=cart_text, callback_data='view_cart'),
         InlineKeyboardButton(text='🆘 Поддержка', callback_data='support'),
     )
     
@@ -378,6 +653,7 @@ def main_menu_kb(user_id: int = None) -> InlineKeyboardMarkup:
         )
     
     return builder.as_markup()
+
 def categories_kb() -> InlineKeyboardMarkup:
     """Категории товаров"""
     builder = InlineKeyboardBuilder()
@@ -391,7 +667,12 @@ def categories_kb() -> InlineKeyboardMarkup:
             )
         )
     
+    # Добавляем кнопку корзины
+    cart_count = cart_manager.get_cart_items_count(categories_kb.__code__.co_argcount)  # Пример
+    cart_text = f'🛒 Корзина ({cart_count})' if cart_count > 0 else '🛒 Корзина'
+    
     builder.row(
+        InlineKeyboardButton(text=cart_text, callback_data='view_cart'),
         InlineKeyboardButton(text='🔙 Главное меню', callback_data='main_menu'),
     )
     return builder.as_markup()
@@ -458,6 +739,13 @@ def products_kb(category_id: int, page: int = 0, items_per_page: int = 5) -> Inl
         if nav_buttons:
             builder.row(*nav_buttons)
     
+    # Кнопка корзины
+    cart_count = cart_manager.get_cart_items_count(products_kb.__code__.co_argcount)
+    cart_text = f'🛒 Корзина ({cart_count})' if cart_count > 0 else '🛒 Корзина'
+    
+    builder.row(
+        InlineKeyboardButton(text=cart_text, callback_data='view_cart'),
+    )
     builder.row(
         InlineKeyboardButton(text='🔙 Назад к категориям', callback_data='view_categories'),
         InlineKeyboardButton(text='🏠 Главное меню', callback_data='main_menu')
@@ -465,16 +753,74 @@ def products_kb(category_id: int, page: int = 0, items_per_page: int = 5) -> Inl
     
     return builder.as_markup()
 
-
 def product_detail_kb(product_id: int, category_id: int) -> InlineKeyboardMarkup:
-    """Детали товара"""
+    """Детали товара - ОБНОВЛЕНО с корзиной"""
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text='💳 Купить сейчас', callback_data=f'buy_product_{product_id}'),
+        InlineKeyboardButton(text='🛒 Добавить в корзину', callback_data=f'add_to_cart_{product_id}'),
+        InlineKeyboardButton(text='💳 Купить сейчас', callback_data=f'buy_product_{product_id}')
+    )
+    
+    # Кнопка корзины
+    cart_count = cart_manager.get_cart_items_count(product_detail_kb.__code__.co_argcount)
+    cart_text = f'🛒 Моя корзина ({cart_count})' if cart_count > 0 else '🛒 Моя корзина'
+    
+    builder.row(
+        InlineKeyboardButton(text=cart_text, callback_data='view_cart'),
     )
     builder.row(
         InlineKeyboardButton(text='🔙 Назад', callback_data=f'category_{category_id}'),
         InlineKeyboardButton(text='🏠 Главное меню', callback_data='main_menu')
+    )
+    return builder.as_markup()
+
+def cart_kb(cart_items: List[Dict], show_checkout: bool = True) -> InlineKeyboardMarkup:
+    """Клавиатура для управления корзиной"""
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопки для каждого товара в корзине
+    for item in cart_items:
+        product = db.get_product(item['product_id'])
+        if product:
+            product_name = product['name']
+            if len(product_name) > 20:
+                product_name = product_name[:17] + "..."
+            
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"➖ {product_name} x{item['quantity']}",
+                    callback_data=f"cart_remove_{item['product_id']}"
+                )
+            )
+    
+    # Кнопки управления
+    if cart_items:
+        if show_checkout:
+            builder.row(
+                InlineKeyboardButton(text='✅ Оформить заказ', callback_data='cart_checkout'),
+                InlineKeyboardButton(text='🗑️ Очистить корзину', callback_data='cart_clear')
+            )
+        
+        builder.row(
+            InlineKeyboardButton(text='➕ Добавить еще товары', callback_data='view_categories'),
+            InlineKeyboardButton(text='✏️ Изменить количество', callback_data='cart_edit_quantity')
+        )
+    
+    builder.row(
+        InlineKeyboardButton(text='🔙 Главное меню', callback_data='main_menu')
+    )
+    
+    return builder.as_markup()
+
+def cart_checkout_kb() -> InlineKeyboardMarkup:
+    """Клавиатура для оформления заказа из корзины"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text='✅ Подтвердить заказ', callback_data='cart_confirm_payment'),
+        InlineKeyboardButton(text='✏️ Изменить корзину', callback_data='view_cart')
+    )
+    builder.row(
+        InlineKeyboardButton(text='❌ Отменить', callback_data='main_menu')
     )
     return builder.as_markup()
 
@@ -582,10 +928,15 @@ async def handle_start(message: Message):
         # Регистрируем пользователя
         db.get_user(user_id)
         
-        welcome_text = f"""👋 Добро пожаловать, @{username}!
+        # Показываем количество товаров в корзине
+        cart_count = cart_manager.get_cart_items_count(user_id)
+        cart_info = f"\n🛒 Товаров в корзине: {cart_count}" if cart_count > 0 else ""
+        
+        welcome_text = f"""👋 Добро пожаловать, @{username}!{cart_info}
 
 ✨ Возможности:
 • 🛒 Просмотр и покупка услуг
+• 🛍️ Корзина для покупки нескольких товаров
 • 💳 Оплата через Ozon (СБП/Карта)
 • ✅ Подтверждение заказов администраторами
 
@@ -600,7 +951,6 @@ async def handle_start(message: Message):
     except Exception as e:
         print(f"Ошибка при обработке /start: {e}")
         await message.answer("❌ Произошла ошибка при запуске")
-
 
 @dp.message(Command("support"))
 async def handle_support_command(message: Message):
@@ -747,11 +1097,17 @@ async def handle_category_products(callback: CallbackQuery):
             text = f"📭 В категории '{category_name}' пока нет товаров"
         else:
             category_name = category.get('name', 'Неизвестно') if category else 'Неизвестно'
-            text = f"🛒 Товары в категории '{category_name}':"
+            items_per_page = 5
+            total_pages = max(1, (len(products) + items_per_page - 1) // items_per_page)
+            
+            text = f"🛒 Товары в категории '{category_name}':\n"
+            text += f"📄 Показано 1-{min(items_per_page, len(products))} из {len(products)} товаров\n\n"
+            text += "Выберите товар:"
         
+        # Всегда показываем первую страницу при первом входе
         await callback.message.edit_text(
             text=text,
-            reply_markup=products_kb(category_id)
+            reply_markup=products_kb(category_id, page=0)
         )
         
     except ValueError:
@@ -779,8 +1135,12 @@ async def handle_product_detail(callback: CallbackQuery):
         # Получаем информацию о категории
         category = db.get_category(product["category_id"])
         
+        # Показываем количество товаров в корзине
+        cart_count = cart_manager.get_cart_items_count(callback.from_user.id)
+        cart_info = f"\n🛒 Товаров в корзине: {cart_count}" if cart_count > 0 else ""
+        
         # Формируем текст
-        product_text = f"""📦 {product['name']}
+        product_text = f"""📦 {product['name']}{cart_info}
 
 💰 Цена: {product['price']:.2f}₽
 📝 Описание: {product.get('description', 'Нет описания')}
@@ -800,6 +1160,440 @@ async def handle_product_detail(callback: CallbackQuery):
         await callback.answer("Ошибка загрузки товара", show_alert=True)
     
     await callback.answer()
+
+# ==================== ОБРАБОТЧИКИ КОРЗИНЫ ====================
+
+@dp.callback_query(F.data == 'view_cart')
+async def handle_view_cart(callback: CallbackQuery, state: FSMContext):
+    """Показать корзину пользователя"""
+    try:
+        user_id = callback.from_user.id
+        cart = cart_manager.get_cart(user_id)
+        cart_total = cart_manager.get_cart_total(user_id)
+        
+        if not cart:
+            await callback.message.edit_text(
+                text="🛒 Ваша корзина пуста\n\n"
+                     "Добавьте товары из категорий!",
+                reply_markup=InlineKeyboardBuilder()
+                    .add(InlineKeyboardButton(text='🛍️ Посмотреть товары', callback_data='view_categories'))
+                    .add(InlineKeyboardButton(text='🏠 Главное меню', callback_data='main_menu'))
+                    .adjust(1)
+                    .as_markup()
+            )
+            return
+        
+        # Формируем текст корзины
+        cart_text = "🛒 Ваша корзина:\n\n"
+        
+        for i, item_detail in enumerate(cart_total['items'], 1):
+            cart_text += f"{i}. {item_detail['name']}\n"
+            cart_text += f"   💰 {item_detail['price']:.2f}₽ × {item_detail['quantity']} = {item_detail['item_total']:.2f}₽\n\n"
+        
+        cart_text += f"📦 Всего товаров: {cart_total['total_quantity']} шт.\n"
+        cart_text += f"💸 Общая сумма: {cart_total['total_amount']:.2f}₽\n\n"
+        cart_text += "Выберите действие:"
+        
+        await state.set_state(CartStates.managing_cart)
+        await callback.message.edit_text(
+            text=cart_text,
+            reply_markup=cart_kb(cart)
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при показе корзины: {e}")
+        await callback.answer("Ошибка при загрузке корзины", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith('add_to_cart_'))
+async def handle_add_to_cart(callback: CallbackQuery, state: FSMContext):
+    """Добавить товар в корзину"""
+    try:
+        # Извлекаем ID товара
+        product_id = int(callback.data.replace('add_to_cart_', ''))
+        
+        # Получаем информацию о товаре
+        product = db.get_product(product_id)
+        if not product:
+            await callback.answer("Товар не найден", show_alert=True)
+            return
+        
+        # Проверяем наличие товара
+        if product.get('quantity', 9999) <= 0:
+            await callback.answer("❌ Товар закончился", show_alert=True)
+            return
+        
+        # Добавляем в корзину
+        if cart_manager.add_to_cart(callback.from_user.id, product_id, 1):
+            # Обновляем кнопки в сообщении товара
+            product = db.get_product(product_id)
+            if product:
+                # Получаем информацию о категории
+                category = db.get_category(product["category_id"])
+                
+                # Показываем количество товаров в корзине
+                cart_count = cart_manager.get_cart_items_count(callback.from_user.id)
+                
+                product_text = f"""📦 {product['name']}
+
+💰 Цена: {product['price']:.2f}₽
+📝 Описание: {product.get('description', 'Нет описания')}
+📊 В наличии: {product.get('quantity', 9999)} шт.
+📁 Категория: {category.get('name', 'Не указана') if category else 'Не указана'}
+
+✅ Товар добавлен в корзину!
+🛒 Товаров в корзине: {cart_count}
+"""
+                
+                await callback.message.edit_text(
+                    text=product_text,
+                    reply_markup=product_detail_kb(product_id, product["category_id"])
+                )
+            
+            await callback.answer(f"✅ {product['name']} добавлен в корзину!")
+        else:
+            await callback.answer("❌ Ошибка при добавлении в корзину", show_alert=True)
+        
+    except Exception as e:
+        print(f"Ошибка при добавлении в корзину: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith('cart_remove_'))
+async def handle_cart_remove(callback: CallbackQuery, state: FSMContext):
+    """Удалить товар из корзины"""
+    try:
+        # Извлекаем ID товара
+        product_id = int(callback.data.replace('cart_remove_', ''))
+        
+        # Удаляем из корзины
+        if cart_manager.remove_from_cart(callback.from_user.id, product_id):
+            # Обновляем сообщение корзины
+            cart = cart_manager.get_cart(callback.from_user.id)
+            cart_total = cart_manager.get_cart_total(callback.from_user.id)
+            
+            if not cart:
+                await callback.message.edit_text(
+                    text="✅ Товар удален из корзины!\n\n"
+                         "🛒 Ваша корзина теперь пуста",
+                    reply_markup=InlineKeyboardBuilder()
+                        .add(InlineKeyboardButton(text='🛍️ Посмотреть товары', callback_data='view_categories'))
+                        .add(InlineKeyboardButton(text='🏠 Главное меню', callback_data='main_menu'))
+                        .adjust(1)
+                        .as_markup()
+                )
+            else:
+                cart_text = "🛒 Ваша корзина:\n\n"
+                
+                for i, item_detail in enumerate(cart_total['items'], 1):
+                    cart_text += f"{i}. {item_detail['name']}\n"
+                    cart_text += f"   💰 {item_detail['price']:.2f}₽ × {item_detail['quantity']} = {item_detail['item_total']:.2f}₽\n\n"
+                
+                cart_text += f"📦 Всего товаров: {cart_total['total_quantity']} шт.\n"
+                cart_text += f"💸 Общая сумма: {cart_total['total_amount']:.2f}₽\n\n"
+                cart_text += "Выберите действие:"
+                
+                await callback.message.edit_text(
+                    text=cart_text,
+                    reply_markup=cart_kb(cart)
+                )
+            
+            await callback.answer("✅ Товар удален из корзины")
+        else:
+            await callback.answer("❌ Товар не найден в корзине", show_alert=True)
+        
+    except Exception as e:
+        print(f"Ошибка при удалении из корзины: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data == 'cart_clear')
+async def handle_cart_clear(callback: CallbackQuery, state: FSMContext):
+    """Очистить корзину"""
+    try:
+        if cart_manager.clear_cart(callback.from_user.id):
+            await callback.message.edit_text(
+                text="✅ Корзина очищена!",
+                reply_markup=InlineKeyboardBuilder()
+                    .add(InlineKeyboardButton(text='🛍️ Посмотреть товары', callback_data='view_categories'))
+                    .add(InlineKeyboardButton(text='🏠 Главное меню', callback_data='main_menu'))
+                    .adjust(1)
+                    .as_markup()
+            )
+            await callback.answer("Корзина очищена")
+        else:
+            await callback.answer("❌ Корзина уже пуста", show_alert=True)
+        
+    except Exception as e:
+        print(f"Ошибка при очистке корзины: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data == 'cart_checkout')
+async def handle_cart_checkout(callback: CallbackQuery, state: FSMContext):
+    """Оформление заказа из корзины"""
+    try:
+        user_id = callback.from_user.id
+        username = callback.from_user.username
+        
+        # Проверяем наличие юзернейма
+        if not username:
+            error_text = """⚠️ У вас не установлен username!
+
+Для оформления заказа необходимо:
+1. Установить username в настройках Telegram
+2. Нажать /start в этом боте
+3. Повторить покупку
+
+📌 Как установить username:
+1. Откройте Настройки Telegram
+2. Выберите "Имя пользователя" (Username)
+3. Установите уникальное имя
+4. Сохраните изменения"""
+            
+            await callback.message.edit_text(
+                text=error_text,
+                reply_markup=InlineKeyboardBuilder()
+                    .add(InlineKeyboardButton(text='🚀 Начать заново (/start)', callback_data='force_start'))
+                    .as_markup()
+            )
+            await callback.answer("❌ Установите username для покупки", show_alert=True)
+            return
+        
+        # Получаем итог корзины
+        cart_total = cart_manager.get_cart_total(user_id)
+        
+        if cart_total['items_count'] == 0:
+            await callback.answer("❌ Корзина пуста", show_alert=True)
+            return
+        
+        # Сохраняем данные для оплаты
+        await state.set_state(PaymentStates.waiting_for_screenshot)
+        
+        # Генерируем ID заказа
+        order_id = f"CART_{user_id}_{int(datetime.now().timestamp())}"
+        
+        # Получаем информацию о методе оплаты
+        payment_info = config.PAYMENT_DETAILS["ozon"]
+        
+        # Сохраняем данные корзины для отправки в канал
+        await state.update_data(
+            user_id=user_id,
+            username=username,
+            order_id=order_id,
+            payment_method='ozon',
+            payment_name=payment_info['name'],
+            cart_total=cart_total,
+            is_cart_order=True
+        )
+        
+        # Формируем текст с товарами из корзины
+        cart_items_text = ""
+        for item in cart_total['items']:
+            cart_items_text += f"• {item['name']} x{item['quantity']} = {item['item_total']:.2f}₽\n"
+        
+        payment_text = f"""🏦 Оплата через {payment_info['name']}
+
+🛒 Ваш заказ из корзины:
+{cart_items_text}
+📦 Всего товаров: {cart_total['total_quantity']} шт.
+💰 Общая сумма: {cart_total['total_amount']:.2f}₽
+
+👤 Ваш username: @{username}
+
+💳 Номер карты для перевода:
+{payment_info['card_number']}
+
+📱 Номер телефона для СБП:
+{payment_info['phone_number']}
+
+👤 Получатель:
+{payment_info['owner']}
+
+📝 В комментарии к переводу укажите:
+Заказ {order_id}
+
+📸 После оплаты отправьте скриншот чека в этот чат
+"""
+        
+        await callback.message.edit_text(
+            text=payment_text,
+            reply_markup=cart_checkout_kb()
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при оформлении заказа из корзины: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+        await state.clear()
+    
+    await callback.answer()
+
+@dp.callback_query(F.data == 'cart_edit_quantity')
+async def handle_cart_edit_quantity(callback: CallbackQuery, state: FSMContext):
+    """Редактирование количества товаров в корзине"""
+    try:
+        user_id = callback.from_user.id
+        cart = cart_manager.get_cart(user_id)
+        
+        if not cart:
+            await callback.answer("Корзина пуста", show_alert=True)
+            return
+        
+        # Создаем клавиатуру для выбора товара для редактирования
+        builder = InlineKeyboardBuilder()
+        cart_total = cart_manager.get_cart_total(user_id)
+        
+        for item_detail in cart_total['items']:
+            product_name = item_detail['name']
+            if len(product_name) > 20:
+                product_name = product_name[:17] + "..."
+            
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"✏️ {product_name} x{item_detail['quantity']}",
+                    callback_data=f"cart_edit_{item_detail['product_id']}"
+                )
+            )
+        
+        builder.row(
+            InlineKeyboardButton(text='🔙 Назад', callback_data='view_cart')
+        )
+        
+        await state.set_state(CartStates.waiting_for_quantity)
+        await callback.message.edit_text(
+            text="✏️ Редактирование количества\n\n"
+                 "Выберите товар, количество которого хотите изменить:",
+            reply_markup=builder.as_markup()
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при редактировании количества: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith('cart_edit_'))
+async def handle_cart_edit_item(callback: CallbackQuery, state: FSMContext):
+    """Выбор товара для редактирования количества"""
+    try:
+        product_id = int(callback.data.replace('cart_edit_', ''))
+        
+        # Сохраняем ID товара для редактирования
+        await state.update_data(edit_product_id=product_id)
+        
+        product = db.get_product(product_id)
+        if product:
+            product_name = product['name']
+        else:
+            product_name = "Товар"
+        
+        await callback.message.edit_text(
+            text=f"✏️ Введите новое количество для товара:\n"
+                 f"📦 {product_name}\n\n"
+                 f"Текущее количество: {cart_manager.get_cart(callback.from_user.id)[0]['quantity'] if cart_manager.get_cart(callback.from_user.id) else 1}\n\n"
+                 f"Введите число:",
+            reply_markup=InlineKeyboardBuilder()
+                .add(InlineKeyboardButton(text='🔙 Назад', callback_data='cart_edit_quantity'))
+                .as_markup()
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при выборе товара для редактирования: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.message(CartStates.waiting_for_quantity)
+async def handle_quantity_input(message: Message, state: FSMContext):
+    """Обработка ввода нового количества"""
+    try:
+        # Получаем ID товара из состояния
+        data = await state.get_data()
+        product_id = data.get('edit_product_id')
+        
+        if not product_id:
+            await message.answer("❌ Ошибка: товар не выбран", reply_markup=cancel_kb())
+            await state.clear()
+            return
+        
+        # Проверяем ввод
+        try:
+            quantity = int(message.text.strip())
+        except ValueError:
+            await message.answer(
+                "❌ Неверный формат!\n\n"
+                "Введите целое число (например: 1, 2, 3):",
+                reply_markup=InlineKeyboardBuilder()
+                    .add(InlineKeyboardButton(text='🔙 Назад', callback_data='cart_edit_quantity'))
+                    .as_markup()
+            )
+            return
+        
+        if quantity <= 0:
+            await message.answer(
+                "❌ Количество должно быть больше 0!\n\n"
+                "Введите новое количество:",
+                reply_markup=InlineKeyboardBuilder()
+                    .add(InlineKeyboardButton(text='🔙 Назад', callback_data='cart_edit_quantity'))
+                    .as_markup()
+            )
+            return
+        
+        # Проверяем наличие товара
+        product = db.get_product(product_id)
+        if product and quantity > product.get('quantity', 9999):
+            await message.answer(
+                f"❌ Доступно только {product.get('quantity', 9999)} шт.!\n\n"
+                "Введите другое количество:",
+                reply_markup=InlineKeyboardBuilder()
+                    .add(InlineKeyboardButton(text='🔙 Назад', callback_data='cart_edit_quantity'))
+                    .as_markup()
+            )
+            return
+        
+        # Обновляем количество
+        if cart_manager.update_quantity(message.from_user.id, product_id, quantity):
+            # Очищаем состояние
+            await state.clear()
+            
+            # Показываем обновленную корзину
+            cart = cart_manager.get_cart(message.from_user.id)
+            cart_total = cart_manager.get_cart_total(message.from_user.id)
+            
+            cart_text = "🛒 Ваша корзина:\n\n"
+            
+            for i, item_detail in enumerate(cart_total['items'], 1):
+                cart_text += f"{i}. {item_detail['name']}\n"
+                cart_text += f"   💰 {item_detail['price']:.2f}₽ × {item_detail['quantity']} = {item_detail['item_total']:.2f}₽\n\n"
+            
+            cart_text += f"📦 Всего товаров: {cart_total['total_quantity']} шт.\n"
+            cart_text += f"💸 Общая сумма: {cart_total['total_amount']:.2f}₽\n\n"
+            cart_text += "✅ Количество обновлено!\n\n"
+            cart_text += "Выберите действие:"
+            
+            await message.answer(
+                text=cart_text,
+                reply_markup=cart_kb(cart)
+            )
+        else:
+            await message.answer(
+                "❌ Ошибка обновления количества",
+                reply_markup=InlineKeyboardBuilder()
+                    .add(InlineKeyboardButton(text='🛒 Вернуться в корзину', callback_data='view_cart'))
+                    .as_markup()
+            )
+            await state.clear()
+        
+    except Exception as e:
+        print(f"Ошибка при вводе количества: {e}")
+        await message.answer("❌ Ошибка", reply_markup=cancel_kb())
+        await state.clear()
+
+# ==================== ОБРАБОТКА ПОКУПКИ ТОВАРА ====================
 
 @dp.callback_query(F.data.startswith('buy_product_'))
 async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
@@ -967,12 +1761,11 @@ async def handle_buy_product(callback: CallbackQuery, state: FSMContext):
     
     await callback.answer()
 
-
 # ==================== ОБРАБОТКА СКРИНШОТОВ ====================
 
 @dp.message(PaymentStates.waiting_for_screenshot, F.photo)
 async def handle_payment_screenshot(message: Message, state: FSMContext):
-    """Обработать полученный скриншот оплаты"""
+    """Обработать полученный скриншот оплаты (обновленная версия)"""
     try:
         # Получаем file_id самого большого размера фото
         file_id = message.photo[-1].file_id
@@ -980,11 +1773,18 @@ async def handle_payment_screenshot(message: Message, state: FSMContext):
         # Получаем данные платежа из состояния
         data = await state.get_data()
         
+        # Проверяем, это заказ из корзины или одиночный товар
+        is_cart_order = data.get('is_cart_order', False)
+        
         # Очищаем состояние
         await state.clear()
         
-        # Обрабатываем платеж
-        await _process_purchase_screenshot(message, data, file_id)
+        if is_cart_order:
+            # Обработка заказа из корзины
+            await _process_cart_purchase_screenshot(message, data, file_id)
+        else:
+            # Обработка одиночного товара (старая логика)
+            await _process_purchase_screenshot(message, data, file_id)
         
     except Exception as e:
         print(f"Ошибка при обработке скриншота: {e}")
@@ -1088,7 +1888,103 @@ async def _process_purchase_screenshot(message: Message, data: dict, file_id: st
             text=error_text,
             reply_markup=main_menu_kb(message.from_user.id)
         )
-    
+
+async def _process_cart_purchase_screenshot(message: Message, data: dict, file_id: str):
+    """Обработать скриншот оплаты заказа из корзины"""
+    try:
+        user_id = data.get('user_id')
+        username = data.get('username')
+        payment_name = data.get('payment_name')
+        order_id = data.get('order_id')
+        cart_total = data.get('cart_total', {})
+        
+        print(f"DEBUG: Обработка заказа из корзины {order_id}")
+        print(f"DEBUG: Пользователь: {username} (ID: {user_id})")
+        print(f"DEBUG: Товаров в корзине: {cart_total.get('items_count', 0)}")
+        print(f"DEBUG: Общая сумма: {cart_total.get('total_amount', 0)}")
+        
+        # Формируем данные заказа
+        order_data = {
+            'user_id': user_id,
+            'username': username,
+            'order_id': order_id,
+            'cart_total': cart_total,
+            'total': cart_total.get('total_amount', 0),
+            'payment_method': payment_name,
+            'is_cart_order': True
+        }
+        
+        # Отправляем в канал
+        result = await send_cart_to_order_channel(order_data, file_id)
+        
+        if result is None:
+            error_text = """❌ Не удалось отправить заявку.
+
+Возможные причины:
+1. Бот не добавлен в канал заказов
+2. У бота нет прав на отправку сообщений в канал
+3. Технические проблемы с Telegram
+
+Пожалуйста, обратитесь к администратору: @koliin98
+"""
+            await message.answer(
+                text=error_text,
+                reply_markup=main_menu_kb(user_id)
+            )
+            return
+        
+        # Обновляем статистику пользователя
+        try:
+            db.update_user_stats(user_id, cart_total.get('total_amount', 0))
+            print(f"DEBUG: Статистика пользователя {user_id} обновлена")
+        except Exception as e:
+            print(f"ERROR: Ошибка обновления статистики: {e}")
+        
+        # Очищаем корзину после успешной оплаты
+        cart_manager.clear_cart(user_id)
+        
+        # Формируем текст с товарами для уведомления пользователя
+        items_text = ""
+        for item in cart_total.get('items', []):
+            items_text += f"• {item['name']} x{item['quantity']} = {item['item_total']:.2f}₽\n"
+        
+        # Уведомляем пользователя
+        success_text = f"""✅ Заказ из корзины оформлен!
+
+🆔 Номер заказа: {order_id}
+🛒 Состав заказа:
+{items_text}
+📦 Всего товаров: {cart_total.get('total_quantity', 0)} шт.
+💰 Общая сумма: {cart_total.get('total_amount', 0):.2f}₽
+💳 Способ оплаты: {payment_name}
+
+📋 Заказ отправлен на обработку.
+Мы свяжемся с вами в ближайшее время.
+"""
+        
+        await message.answer(
+            text=success_text,
+            reply_markup=main_menu_kb(user_id)
+        )
+        print(f"DEBUG: Пользователь уведомлен об успешной отправке заказа из корзины")
+        
+    except Exception as e:
+        print(f"❌ Ошибка при обработке скриншота заказа из корзины: {e}")
+        import traceback
+        print(f"❌ Трассировка ошибки:\n{traceback.format_exc()}")
+        
+        error_text = f"""❌ Ошибка при обработке заказа
+
+Произошла техническая ошибка.
+Пожалуйста, обратитесь к администратору: @koliin98
+
+Ошибка: {str(e)}
+"""
+        await message.answer(
+            text=error_text,
+            reply_markup=main_menu_kb(message.from_user.id)
+        )
+
 @dp.callback_query(PaymentStates.waiting_for_screenshot, F.data == 'cancel')
 async def handle_cancel_payment(callback: CallbackQuery, state: FSMContext):
     """Отмена оплаты"""
@@ -1172,8 +2068,15 @@ async def handle_confirm_order(callback: CallbackQuery):
         
         user_id = order_data.get('user_id')
         total_amount = order_data.get('total', 0)
-        product_name = order_data.get('product_name', 'Неизвестный товар')
         username = callback.from_user.username or callback.from_user.first_name
+        
+        # Проверяем, это заказ из корзины или одиночный
+        is_cart_order = order_data.get('is_cart_order', False)
+        
+        if is_cart_order:
+            product_name = f"Заказ из корзины ({order_data.get('total_quantity', 0)} товаров)"
+        else:
+            product_name = order_data.get('product_name', 'Неизвестный товар')
         
         # Удаляем из ожидающих
         db.remove_pending_order(order_id)
@@ -1203,7 +2106,26 @@ async def handle_confirm_order(callback: CallbackQuery):
         
         # Уведомляем пользователя
         try:
-            user_message = f"""✅ Ваш заказ подтвержден администратором!
+            if is_cart_order:
+                # Формируем текст для заказа из корзины
+                cart_items_text = ""
+                cart_items = order_data.get('cart_items', [])
+                for item in cart_items:
+                    cart_items_text += f"• {item['name']} x{item['quantity']} = {item['item_total']:.2f}₽\n"
+                
+                user_message = f"""✅ Ваш заказ из корзины подтвержден администратором!
+
+🆔 Номер заказа: {order_id}
+🛒 Состав заказа:
+{cart_items_text}
+📦 Всего товаров: {order_data.get('total_quantity', 0)} шт.
+💰 Общая сумма: {total_amount:.2f}₽
+
+📦 Товары будут отправлены вам в ближайшее время.
+"""
+            else:
+                # Формируем текст для одиночного заказа
+                user_message = f"""✅ Ваш заказ подтвержден администратором!
 
 🆔 Номер заказа: {order_id}
 📦 Товар: {product_name}
@@ -1271,49 +2193,6 @@ async def handle_page_change(callback: CallbackQuery):
     
     await callback.answer()
 
-@dp.callback_query(F.data.startswith('category_'))
-async def handle_category_products(callback: CallbackQuery):
-    """Показать товары в выбранной категории (первая страница)"""
-    try:
-        # Извлекаем ID категории
-        _, category_id_str = callback.data.split('_')
-        category_id = int(category_id_str)
-        
-        # Получаем категорию и товары
-        category = db.get_category(category_id)
-        products = db.get_products_by_category(category_id)
-        
-        if not products:
-            category_name = category.get('name', 'Неизвестно') if category else 'Неизвестно'
-            text = f"📭 В категории '{category_name}' пока нет товаров"
-        else:
-            category_name = category.get('name', 'Неизвестно') if category else 'Неизвестно'
-            items_per_page = 5
-            total_pages = max(1, (len(products) + items_per_page - 1) // items_per_page)
-            
-            text = f"🛒 Товары в категории '{category_name}':\n"
-            text += f"📄 Показано 1-{min(items_per_page, len(products))} из {len(products)} товаров\n\n"
-            text += "Выберите товар:"
-        
-        # Всегда показываем первую страницу при первом входе
-        await callback.message.edit_text(
-            text=text,
-            reply_markup=products_kb(category_id, page=0)
-        )
-        
-    except ValueError:
-        await callback.answer("Неверный ID категории", show_alert=True)
-    except Exception as e:
-        print(f"Ошибка при загрузке товаров категории: {e}")
-        await callback.answer("Ошибка загрузки товаров", show_alert=True)
-    
-    await callback.answer()
-
-@dp.callback_query(F.data == 'no_action')
-async def handle_no_action(callback: CallbackQuery):
-    """Обработка неактивных кнопок (номер страницы)"""
-    await callback.answer()  # Просто отвечаем, но ничего не делаем
-
 @dp.callback_query(F.data.startswith('reject_order_'))
 async def handle_reject_order(callback: CallbackQuery):
     """Отклонить заказ администратором"""
@@ -1334,7 +2213,14 @@ async def handle_reject_order(callback: CallbackQuery):
         
         user_id = order_data.get('user_id')
         total_amount = order_data.get('total', 0)
-        product_name = order_data.get('product_name', 'Неизвестный товар')
+        
+        # Проверяем, это заказ из корзины или одиночный
+        is_cart_order = order_data.get('is_cart_order', False)
+        
+        if is_cart_order:
+            product_name = f"Заказ из корзины ({order_data.get('total_quantity', 0)} товаров)"
+        else:
+            product_name = order_data.get('product_name', 'Неизвестный товар')
         
         # Удаляем из ожидающих
         db.remove_pending_order(order_id)
@@ -1393,12 +2279,13 @@ async def handle_admin_panel(callback: CallbackQuery):
         # Статистика для админ-панели
         pending_orders = len(db.pending_orders)
         
-        admin_text = f"""👨‍💼 ААдмин-панель
+        admin_text = f"""👨‍💼 Админ-панель
 
 📊 Быстрая статистика:
 • 🛒 Ожидающих заказов: {pending_orders}
 • 👥 Пользователей: {len(db.users)}
 • 📦 Товаров: {len(db.products)}
+• 🛍️ Активных корзин: {len(cart_manager.carts)}
 
 Выберите раздел для управления:
 """
@@ -1433,7 +2320,12 @@ async def handle_admin_pending(callback: CallbackQuery):
             for i, (order_id, order_data) in enumerate(pending_orders.items(), 1):
                 text += f"{i}. 🆔 {order_id}\n"
                 text += f"   👤 @{order_data.get('username', 'N/A')} ({order_data.get('user_id')})\n"
-                text += f"   📦 {order_data.get('product_name', 'Неизвестно')}\n"
+                
+                if order_data.get('is_cart_order'):
+                    text += f"   🛍️ Заказ из корзины ({order_data.get('total_quantity', 0)} товаров)\n"
+                else:
+                    text += f"   📦 {order_data.get('product_name', 'Неизвестно')}\n"
+                
                 text += f"   💰 {order_data.get('total', 0)}₽\n\n"
         
         # Создаем клавиатуру
@@ -1525,6 +2417,10 @@ async def handle_admin_stats(callback: CallbackQuery):
         total_orders = sum(user.get('total_orders', 0) for user in db.users.values())
         total_spent = sum(user.get('total_spent', 0) for user in db.users.values())
         
+        # Статистика по корзинам
+        active_carts = len(cart_manager.carts)
+        total_cart_items = sum(len(cart) for cart in cart_manager.carts.values())
+        
         # Формируем сообщение
         stats_text = f"""📊 СТАТИСТИКА БОТА
 
@@ -1533,6 +2429,8 @@ async def handle_admin_stats(callback: CallbackQuery):
 • 📦 Товаров: {products_count}
 • 👥 Пользователей: {users_count}
 • ⏳ Ожидающих заказов: {len(db.pending_orders)}
+• 🛍️ Активных корзин: {active_carts}
+• 🛒 Товаров в корзинах: {total_cart_items}
 
 💰 Финансовая статистика:
 • 🛒 Покупок: {len(purchases)} на {total_purchases:.2f}₽
@@ -1642,7 +2540,6 @@ async def handle_admin_list_products(callback: CallbackQuery):
     
     await callback.answer()
 
-
 @dp.callback_query(F.data == 'force_start')
 async def handle_force_start(callback: CallbackQuery, state: FSMContext):
     """Принудительный запуск бота с проверкой username"""
@@ -1676,12 +2573,17 @@ async def handle_force_start(callback: CallbackQuery, state: FSMContext):
         # Регистрируем пользователя
         db.get_user(user_id)
         
-        welcome_text = f"""✅ Username обнаружен: @{username}
+        # Показываем количество товаров в корзине
+        cart_count = cart_manager.get_cart_items_count(user_id)
+        cart_info = f"\n🛒 Товаров в корзине: {cart_count}" if cart_count > 0 else ""
+        
+        welcome_text = f"""✅ Username обнаружен: @{username}{cart_info}
 
 👋 Добро пожаловать в магазин виртуальных услуг!
 
 ✨ Возможности:
 • 🛒 Просмотр и покупка услуг
+• 🛍️ Корзина для покупки нескольких товаров
 • 💳 Оплата через Ozon (СБП/Карта)
 • ✅ Подтверждение заказов администраторами
 
@@ -1697,9 +2599,6 @@ async def handle_force_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка", show_alert=True)
     
     await callback.answer()
-
-
-
 
 @dp.callback_query(F.data == 'admin_list_categories')
 async def handle_admin_list_categories(callback: CallbackQuery):
@@ -1756,9 +2655,13 @@ async def handle_admin_delete_product(callback: CallbackQuery, state: FSMContext
         builder = InlineKeyboardBuilder()
         
         for product in products:
+            product_name = product['name']
+            if len(product_name) > 25:
+                product_name = product_name[:22] + "..."
+            
             builder.row(
                 InlineKeyboardButton(
-                    text=f"🗑️ {product['name']} - {product['price']}₽",
+                    text=f"🗑️ {product_name} - {product['price']}₽",
                     callback_data=f"admin_delete_product_confirm_{product['id']}"
                 )
             )
@@ -1818,8 +2721,6 @@ async def handle_no_username_warning(callback: CallbackQuery):
     except Exception as e:
         print(f"Ошибка при показе предупреждения: {e}")
         await callback.answer("Ошибка", show_alert=True)
-
-
 
 @dp.callback_query(F.data.startswith('admin_delete_product_confirm_'))
 async def handle_admin_delete_product_confirm(callback: CallbackQuery):
@@ -2305,6 +3206,10 @@ async def handle_stats_command(message: Message):
         purchases = [t for t in db.transactions if t['type'] == 'purchase']
         total_purchases = sum(abs(t['amount']) for t in purchases)
         
+        # Статистика по корзинам
+        active_carts = len(cart_manager.carts)
+        total_cart_items = sum(len(cart) for cart in cart_manager.carts.values())
+        
         stats_text = f"""📊 СТАТИСТИКА БОТА (команда /stats)
 
 📈 Общая статистика:
@@ -2312,6 +3217,8 @@ async def handle_stats_command(message: Message):
 • 📦 Товаров: {products_count}
 • 👥 Пользователей: {users_count}
 • ⏳ Ожидающих заказов: {pending_orders}
+• 🛍️ Активных корзин: {active_carts}
+• 🛒 Товаров в корзинах: {total_cart_items}
 
 💰 Финансовая статистика:
 • 🛒 Всего покупок: {len(purchases)}
@@ -2326,6 +3233,11 @@ async def handle_stats_command(message: Message):
     except Exception as e:
         print(f"Ошибка при показе статистики: {e}")
         await message.answer("❌ Ошибка при загрузке статистики")
+
+@dp.callback_query(F.data == 'no_action')
+async def handle_no_action(callback: CallbackQuery):
+    """Обработка неактивных кнопок (номер страницы)"""
+    await callback.answer()  # Просто отвечаем, но ничего не делаем
 
 # ==================== ЗАПУСК БОТА ====================
 
@@ -2345,15 +3257,20 @@ async def main():
 • 👥 Пользователей: {len(db.users)}
 • 💳 Транзакций: {len(db.transactions)}
 • ⏳ Ожидающих заказов: {len(db.pending_orders)}
+• 🛍️ Активных корзин: {len(cart_manager.carts)}
 
 ⚙️ Конфигурация:
 • 👨‍💼 Администраторы: {config.ADMIN_IDS}
 • 💳 Оплата: Только Ozon (СБП/Карта)
 • 📊 Каналы: Заказы - {config.ORDER_CHANNEL_ID}
 
+🎉 НОВАЯ ФУНКЦИЯ:
+• 🛍️ Корзина для покупки нескольких товаров
+
 {'=' * 50}
 ✅ Бот готов к работе!
 ✅ Оплата только через Ozon (СБП/Карта)
+✅ Корзина активирована!
 {'=' * 50}
 """
     print(startup_info)
@@ -2370,6 +3287,10 @@ async def main():
     except Exception as e:
         print(f"❌ Критическая ошибка при запуске бота: {e}")
     finally:
+        # Сохраняем данные корзины перед выходом
+        cart_manager.save_carts()
+        print("✅ Данные корзины сохранены")
+        
         # Закрываем сессию бота
         await bot.session.close()
         print("✅ Сессия бота закрыта")

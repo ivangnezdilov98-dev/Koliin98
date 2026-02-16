@@ -38,8 +38,8 @@ class Config:
     }
 
     # Файлы данных
-    DATA_FILE = "products_data.json"
-    USERS_FILE = "users_data.json"
+    DATA_FILE = "products_dat.json"
+    USERS_FILE = "users_dat.json"
 
 config = Config()
 
@@ -3298,3 +3298,4 @@ async def main():
 if __name__ == "__main__":
     # Запускаем бота
     asyncio.run(main())
+
